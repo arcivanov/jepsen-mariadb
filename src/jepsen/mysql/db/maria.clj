@@ -147,37 +147,6 @@ PrivateDevices=false"
                   :log-message    "Waiting for slave IO to start running"
                   :timeout        60000}))
 
-(defn setup-replication!
-  "Initiates binlog replication between the primary and secondaries."
-  [test node repl-state]
-  ; Following https://mariadb.com/kb/en/setting-up-replication/
-  (let [c (mc/await-open test node)]
-    (if (= (jepsen/primary test) node)
-      ; On leader
-      (do (info "Setting up leader for replication")
-          (j/execute! c ["FLUSH TABLES WITH READ LOCK"])
-          (let [r (j/execute-one! c ["SHOW MASTER STATUS"])
-                pos (:Position r)
-                file (:File r)]
-            ;(info :pos pos, :file file)
-            (deliver repl-state {:position pos, :file file})
-            ; TODO: copy data here
-          (j/execute! c ["UNLOCK TABLES"])))
-      ; On followers
-      (let [{:keys [position file]} @repl-state]
-        (info "Setting up follower for replication")
-        (j/execute-one! c [(str "CHANGE MASTER TO"
-                                " MASTER_HOST='" (jepsen/primary test)
-                                "', MASTER_USER='" mc/user
-                                "', MASTER_PASSWORD='" mc/password
-                                "', MASTER_PORT=" mc/port
-                                ", MASTER_LOG_FILE='" file
-                                "', MASTER_LOG_POS=" position
-                                ; lmao what, why, docs say to do this but ????
-                                ", MASTER_CONNECT_RETRY=10;")])
-        (j/execute-one! c ["START SLAVE"])
-        (await-slave-sql-running c)))))
-
 (defn bootstrap-primary!
   "On the primary node only, run the bootstrap phase, as per https://mariadb.com/docs/galera-cluster/galera-management/installation-and-deployment/getting-started-with-mariadb-galera-cluster."
   [test node]
@@ -220,10 +189,7 @@ PrivateDevices=false"
         (start!)
 
         ; And create our DB
-        (make-db! test)
-        ;(jepsen/synchronize test)
-        ;(setup-replication! test node repl-state)
-        )
+        (make-db! test))
 
       (teardown! [this test node]
         (db/kill! this test node)
