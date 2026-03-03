@@ -1,5 +1,9 @@
 # Adapted from the version installed by MariaDB at /etc/mariadb.conf.d/60-galera.cnf
 
+[mariadb]
+# We don't need log-bin for Galera
+log_bin = OFF
+
 [galera]
 wsrep_cluster_name       = "jepsen cluster"
 
