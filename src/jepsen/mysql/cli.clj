@@ -121,6 +121,7 @@
                       " " (name workload-name)
                       (when (:lazyfs opts) " lazyfs")
                       " binlog=" (name (:binlog-format opts))
+                      " flush-log=" (:innodb-flush-log-at-trx-commit opts)
                       (when (:innodb-snapshot-isolation opts)
                         " snapshot-isolation")
                       " " (short-isolation (:isolation opts)) "("
