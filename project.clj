@@ -9,11 +9,11 @@
                   :exclusions [com.fasterxml.jackson.core/jackson-core
                                com.fasterxml.jackson.core/jackson-annotations
                                com.fasterxml.jackson.core/jackson-databind]]
-                 [jepsen "0.3.11-SNAPSHOT"
+                 [jepsen "0.3.11"
                   :exclusions [com.fasterxml.jackson.core/jackson-databind
                                com.fasterxml.jackson.core/jackson-annotations
                                com.fasterxml.jackson.core/jackson-core]]
-                 [io.jepsen/antithesis "0.1.0-SNAPSHOT"]
+                 [io.jepsen/antithesis "0.1.0"]
                  [http-kit "2.8.1"]
                  [com.github.seancorfield/next.jdbc "1.3.1070"]
                  [com.mysql/mysql-connector-j "9.5.0"]
