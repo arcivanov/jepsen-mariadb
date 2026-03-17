@@ -1,6 +1,6 @@
-(defproject jepsen.mysql "0.0.2"
-  :description "Tests for MySQL with read replicas"
-  :url "https://github.com/jepsen-io/jepsen"
+(defproject jepsen.mysql "0.0.3-SNAPSHOT"
+  :description "Jepsen tests for MySQL and MariaDB"
+  :url "https://github.com/jepsen-io/mysql"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
   :dependencies [[org.clojure/clojure "1.12.4"]
