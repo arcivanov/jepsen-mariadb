@@ -20,7 +20,8 @@
             [jepsen.mysql [append :as append]
                           [closed-predicate :as closed-predicate]
                           [mav :as mav]
-                          [nonrepeatable-read :as nonrepeatable-read]]
+                          [nonrepeatable-read :as nonrepeatable-read]
+                          [build-smoke-test :as build-smoke-test]]
             [jepsen.mysql.db [maria :as db.maria]
                              [maria-docker :as db.maria-docker]
                              [mysql :as db.mysql]
@@ -42,6 +43,7 @@
    :closed-predicate    closed-predicate/workload
    :mav                 mav/workload
    :nonrepeatable-read  nonrepeatable-read/workload
+   :build-smoke-test    build-smoke-test/workload
    :none (fn [_] tests/noop-test)})
 
 (def all-workloads

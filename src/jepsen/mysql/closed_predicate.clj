@@ -149,9 +149,9 @@
             ; cluster and the DB automation isn't wiping the state for us.
             (j/execute! conn [(str "delete from " (table-name i))]))))))
 
-  (invoke! [this test {:keys [index time f value] :as op}]
+  (invoke! [this test {:keys [f value] :as op}]
     (let [[system value] value
-          query_id (str "/* " index "_" time " */ ")]
+          query_id (c/query-id op)]
       ; One-time connection setup
       (when (compare-and-set! initialized? false true)
         (c/set-transaction-isolation! conn (:isolation test)))

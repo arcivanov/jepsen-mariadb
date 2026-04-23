@@ -160,7 +160,7 @@
       (timeout 10000 (throw+ {:type :timeout})
                (let [txn       (:value op)
                      use-txn?  (< 1 (count txn))
-                     query_id  (str "/* " (:index op) "_" (:time op) " */ ")
+                     query_id  (c/query-id op)
                      txn'      (if use-txn?
                                  ;(if true
                                  (j/with-transaction [t conn

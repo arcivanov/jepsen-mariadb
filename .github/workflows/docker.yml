@@ -1,0 +1,158 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/mariadb-jepsen
+  IMAGE_ARTIFACT: /tmp/mariadb-jepsen.tar.zst
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      is_release: ${{ steps.version.outputs.is_release }}
+      release_version: ${{ steps.version.outputs.release_version }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse version from project.clj
+        id: version
+        run: |
+          VERSION=$(grep -oP '(?<=defproject jepsen\.mariadb ")[^"]+' project.clj)
+
+          COMMIT_MSG=$(git log -1 --format=%s)
+          IS_RELEASE=false
+          RELEASE_VERSION=""
+
+          if [[ "$COMMIT_MSG" =~ \[release\ ([0-9]+\.[0-9]+\.[0-9]+)\] ]]; then
+            IS_RELEASE=true
+            RELEASE_VERSION="${BASH_REMATCH[1]}"
+          elif [[ "$COMMIT_MSG" =~ \[release\] ]]; then
+            IS_RELEASE=true
+            RELEASE_VERSION="${VERSION%-SNAPSHOT}"
+          fi
+
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "$IS_RELEASE" = "true" ]; then
+            TAG="$RELEASE_VERSION"
+          else
+            BASE="${VERSION%-SNAPSHOT}"
+            TS=$(date -u +%Y%m%d%H%M%S)
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG="${BASE}-${TS}-${SHORT_SHA}"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: mariadb-docker/Dockerfile
+          load: true
+          tags: mariadb-jepsen:${{ steps.version.outputs.tag }}
+
+      - name: Save image
+        run: docker save mariadb-jepsen:${{ steps.version.outputs.tag }} | zstd -T0 -o $IMAGE_ARTIFACT
+
+      - name: Upload image
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.IMAGE_ARTIFACT }}
+          archive: false
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v8
+        with:
+          name: mariadb-jepsen.tar.zst
+          path: /tmp
+
+      - name: Load image
+        run: zstd -d $IMAGE_ARTIFACT --stdout | docker load
+
+      - name: Integration test
+        run: |
+          docker run -e TEST_SCRIPT=/verify.sh \
+            mariadb-jepsen:${{ needs.build.outputs.tag }} \
+            https://github.com/MariaDB/server 10.11
+        timeout-minutes: 180
+
+  publish:
+    needs: [build, test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download image
+        uses: actions/download-artifact@v8
+        with:
+          name: mariadb-jepsen.tar.zst
+          path: /tmp
+
+      - name: Load image
+        run: zstd -d $IMAGE_ARTIFACT --stdout | docker load
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push
+        run: |
+          docker tag mariadb-jepsen:${{ needs.build.outputs.tag }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.tag }}
+          docker tag mariadb-jepsen:${{ needs.build.outputs.tag }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.tag }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Release version bump
+        if: needs.build.outputs.is_release == 'true'
+        run: |
+          set -e
+          RELEASE_VERSION="${{ needs.build.outputs.release_version }}"
+
+          IFS='.' read -r MAJOR MINOR MICRO <<< "$RELEASE_VERSION"
+          if ! [[ "$MICRO" =~ ^[0-9]+$ ]]; then
+            echo "Error: invalid micro version '$MICRO' in $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          sed -i "s/defproject jepsen\.mariadb \"[^\"]*\"/defproject jepsen.mariadb \"${RELEASE_VERSION}\"/" project.clj
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add project.clj
+          git commit -m "Release ${RELEASE_VERSION} [skip ci]"
+          git tag "v${RELEASE_VERSION}"
+
+          NEXT_MICRO=$((MICRO + 1))
+          NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_MICRO}-SNAPSHOT"
+          sed -i "s/defproject jepsen\.mariadb \"[^\"]*\"/defproject jepsen.mariadb \"${NEXT_VERSION}\"/" project.clj
+          git add project.clj
+          git commit -m "Version ${NEXT_VERSION} [skip ci]"
+
+          git push origin HEAD:main --tags
