@@ -19,7 +19,7 @@
             [next.jdbc :as j]
             [next.jdbc.result-set :as rs]
             [next.jdbc.sql.builder :as sqlb]
-            [slingshot.slingshot :refer [try+ throw+]]))
+            [clj-commons.slingshot :refer [try+ throw+]]))
 
 ; initialized? is an atom which we set when we first use the connection--we set
 ; up initial isolation levels, logging info, etc. This has to be stateful
@@ -49,8 +49,8 @@
           (j/execute! conn ["insert into mav (id, `value`, noop) values (?, ?, ?)" 0 0 0])
           (j/execute! conn ["insert into mav (id, `value`, noop) values (?, ?, ?)" 1 0 0])))))
 
-  (invoke! [this test {:keys [index time f value] :as op}]
-    (let [query_id (str "/* " index "_" time " */ ")]
+  (invoke! [this test {:keys [f value] :as op}]
+    (let [query_id (c/query-id op)]
       (case f
         :write
         (j/with-transaction [t conn {:isolation (:isolation test)}]

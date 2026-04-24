@@ -23,7 +23,7 @@
             [next.jdbc :as j]
             [next.jdbc.result-set :as rs]
             [next.jdbc.sql.builder :as sqlb]
-            [slingshot.slingshot :refer [try+ throw+]]))
+            [clj-commons.slingshot :refer [try+ throw+]]))
 
 ; initialized? is an atom which we set when we first use the connection--we set
 ; up initial isolation levels, logging info, etc. This has to be stateful
@@ -53,8 +53,8 @@
           (j/execute! conn ["insert into people (id, name, gender) values (?, ?, ?)"
                             0 "moss" "enby"])))))
 
-  (invoke! [this test {:keys [index time f value] :as op}]
-    (let [query_id (str "/* " index "_" time " */ ")]
+  (invoke! [this test {:keys [f value] :as op}]
+    (let [query_id (c/query-id op)]
       (case f
         :change-name (do (j/execute!
                            conn [(str query_id "update people set name = ? where id = ?")

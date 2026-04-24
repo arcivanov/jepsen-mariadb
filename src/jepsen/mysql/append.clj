@@ -2,21 +2,23 @@
   "A test for transactional list append."
   (:require [clojure.tools.logging :refer [info warn]]
             [clojure [pprint :refer [pprint]]
+                     [set :as set]
                      [string :as str]]
             [dom-top.core :refer [loopr with-retry]]
             [elle.core :as elle]
-            [jepsen [checker :as checker]
-             [client :as client]
-             [core :as jepsen]
-             [generator :as gen]
-             [util :as util :refer []]]
+            [jepsen [antithesis :as antithesis]
+                    [checker :as checker]
+                    [client :as client]
+                    [core :as jepsen]
+                    [generator :as gen]
+                    [util :as util :refer [timeout]]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.tests.cycle.append :as append]
             [jepsen.mysql [client :as c]]
             [next.jdbc :as j]
             [next.jdbc.result-set :as rs]
             [next.jdbc.sql.builder :as sqlb]
-            [slingshot.slingshot :refer [try+ throw+]]))
+            [clj-commons.slingshot :refer [try+ throw+]]))
 
 (def default-table-count 3)
 
@@ -126,7 +128,11 @@
 (defrecord Client [node conn initialized?]
   client/Client
   (open! [this test node]
-    (let [c (c/open test node)]
+    (let [c (try (c/open test node)
+                 (catch Throwable t
+                   ; Slow down reconnects
+                   (Thread/sleep 1000)
+                   (throw t)))]
       (assoc this
              :node          node
              :conn          c
@@ -151,16 +157,17 @@
       (c/set-transaction-isolation! conn (:isolation test)))
 
     (c/with-errors op
-      (let [txn       (:value op)
-            use-txn?  (< 1 (count txn))
-            query_id  (str "/* " (:index op) "_" (:time op) " */ ")
-            txn'      (if use-txn?
-                      ;(if true
-                        (j/with-transaction [t conn
-                                             {:isolation (:isolation test)}]
-                          (mapv (partial mop! t test query_id true) txn))
-                        (mapv (partial mop! conn test query_id false) txn))]
-        (assoc op :type :ok, :value txn'))))
+      (timeout 10000 (throw+ {:type :timeout})
+               (let [txn       (:value op)
+                     use-txn?  (< 1 (count txn))
+                     query_id  (c/query-id op)
+                     txn'      (if use-txn?
+                                 ;(if true
+                                 (j/with-transaction [t conn
+                                                      {:isolation (:isolation test)}]
+                                   (mapv (partial mop! t test query_id true) txn))
+                                 (mapv (partial mop! conn test query_id false) txn))]
+                 (assoc op :type :ok, :value txn')))))
 
   (teardown! [_ test])
 
@@ -183,8 +190,9 @@
   (not= 0 (mod (:process op) (count (:nodes test)))))
 
 (defn ro-gen
-  "Nothing stops you from writing to a secondary, which is, uh, exciting. We'll
-  set up our generator to *only* emit reads to any non-primary node."
+  "Nothing in standard MySQL replication stops you from writing to a secondary,
+  which is, uh, exciting. We'll set up our generator to *only* emit reads to
+  any non-primary node."
   [gen]
   (reify gen/Generator
     (update [this test ctx event]
@@ -201,6 +209,27 @@
               true
               [op (ro-gen gen')])))))
 
+(defn antithesis-checker
+  "Wraps the normal Elle checker in one that allows unknown outcomes, for
+  Antithesis."
+  [checker]
+  (if (antithesis/antithesis?)
+    (reify checker/Checker
+      (check [this test history opts]
+        (let [res (checker/check checker test history opts)
+              ; Empty transaction graphs would normally indicate a broken test,
+              ; but Antithesis does this all the time.
+              res (if (empty? (set/difference (set (:anomaly-types res))
+                                              #{:empty-transaction-graph}))
+                    (assoc res :valid? true)
+                    res)]
+          ; We always want to pass
+          (antithesis/assert-always (true? (:valid? res))
+                                    "elle valid"
+                                    res)
+          res)))
+    checker))
+
 (defn workload
   "A list append workload."
   [opts]
@@ -210,4 +239,7 @@
                           :min-txn-length 1
                           :consistency-models [(:expected-consistency-model opts)]))
       (assoc :client (Client. nil nil nil))
-      (update :generator ro-gen)))
+      ; Galera lets us write anywhere, wooo!
+      ;(update :generator ro-gen)
+      (update :checker antithesis-checker)
+      ))

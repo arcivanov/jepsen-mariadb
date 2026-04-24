@@ -1,23 +1,12 @@
 (ns jepsen.mysql.db.maria-docker
   "Automates setting up and tearing down MariaDB."
-  (:require [clojure [pprint :refer [pprint]]
-                     [string :as str]]
+  (:require [clojure [string :as str]]
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [control :as c]
-                    [core :as jepsen]
-                    [db :as db]
-                    [util :as util :refer [meh]]]
-            [jepsen.control [net :as cn]
-                            [util :as cu]]
-            [jepsen.os.debian :as debian]
+            [jepsen [db :as db]]
             [jepsen.mysql [client :as mc]]
-            [jepsen.mysql.db.maria :as db.maria]
             [next.jdbc :as j]
-            [next.jdbc.result-set :as rs]
-            [clojure.java.shell :refer [sh]]
-            [org.httpkit.client :as http]
-            [slingshot.slingshot :refer [try+ throw+]]))
+            [clojure.java.shell :refer [sh]]))
 
 (def default-home-dir "/home/mariadb")
 (def default-cnf-path (str default-home-dir "/.my.cnf"))
@@ -106,28 +95,31 @@
   [test]
   (let [c (mc/await-open test "localhost" {:db "mysql"})]
     (j/execute! c [(str "CREATE DATABASE " mc/db)])
-    (if (:innodb-strict-isolation test)
+    (if (:innodb-snapshot-isolation test)
       (j/execute! c ["SET GLOBAL innodb_snapshot_isolation=ON"]))))
 
 (defn db
   "A MySQL database. Takes CLI options."
   [opts]
-  (let [; A promise which will receive the file and position of the leader node
-        repl-state (promise)]
-    (reify
+  (reify
       db/DB
       (setup! [this test node]
         (configure! test)
-        (sh (str (install-dir test) "/scripts/mariadb-install-db")
-            (str "--defaults-file=" (cnf-path test)))
+        (let [idir (install-dir test)
+              base-arg (if (.exists (io/file idir "share" "fill_help_tables.sql"))
+                         (str "--basedir=" idir)
+                         (str "--srcdir=" default-home-dir "/mariadb-bin"))]
+          (sh (str idir "/scripts/mariadb-install-db")
+              (str "--defaults-file=" (cnf-path test))
+              base-arg))
         (db/start! this test node)
         (make-db! test))
 
       (teardown! [this test node]
-        (if-not (:dont-teardown test)
-          ((db/kill! this test node)
-           (sh "rm" "-rf" (data-dir test))
-           (sh "rm" (cnf-path test)))))
+        (when-not (:dont-teardown test)
+          (db/kill! this test node)
+          (sh "rm" "-rf" (data-dir test))
+          (sh "rm" (cnf-path test))))
 
       db/LogFiles
       (log-files [this test node] [])
@@ -148,6 +140,7 @@
                       :env {:_RR_TRACE_DIR rr-trace-dir}))
              (sh (str bin-dir "/mariadbd-safe")
                  (str "--defaults-file=" opt-cnf-path)
+                 (str "--basedir=" opt-install-dir)
                  "--no-auto-restart" "--skip-grant-tables"))
            (while
              (not= (:exit
@@ -167,4 +160,4 @@
         (sh (str bin-dir "/mysqladmin")
             (str "--defaults-file=" opt-cnf-path)
             (str "--socket=" (socket test))
-            "-uroot" "shutdown" "--shutdown-timeout=3600"))))))
+            "-uroot" "shutdown" "--shutdown-timeout=3600")))))

@@ -1,12 +1,13 @@
 (ns jepsen.mysql.client
   "Helper functions for interacting with MySQL clients."
-  (:require [clojure.tools.logging :refer [info warn]]
+  (:require [clojure [pprint :refer [pprint]]]
+            [clojure.tools.logging :refer [info warn]]
             [jepsen [client :as client]
                     [util :as util]]
             [next.jdbc :as j]
             [next.jdbc.result-set :as rs]
             [next.jdbc.sql.builder :as sqlb]
-            [slingshot.slingshot :refer [try+ throw+]])
+            [clj-commons.slingshot :refer [try+ throw+]])
   (:import (java.sql Connection
                      SQLNonTransientConnectionException
                      SQLTransactionRollbackException)
@@ -97,6 +98,11 @@
                   :log-message    "Waiting for MySQL connection"
                   :timeout        10000})))
 
+(defn query-id
+  "Constructs a SQL comment prefix from an operation's index and time."
+  [op]
+  (str "/* " (:index op) "_" (:time op) " */ "))
+
 (defmacro with-errors
   "Takes an operation and a body, turning known errors into :fail or :info ops."
   [op & body]
@@ -105,16 +111,40 @@
           (assoc ~op :type :fail, :error :rollback))
         (catch MySQLTransactionRollbackException e#
           (assoc ~op :type :fail, :error :rollback))
-        (catch clojure.lang.ExceptionInfo e#
-          (if (re-find #"Rollback failed handling" (.getMessage e#))
+        (catch (and (:rollback ~'%) (:handling ~'%)) e#
+          (condp re-find (:message ~'&throw-context)
+            #"Rollback failed"
             (assoc ~op :type :info, :error :rollback-failed)
+
             (throw+ e#)))
         (catch SQLNonTransientConnectionException e#
           (condp re-find (.getMessage e#)
-            #"unexpected end of stream"
-            (assoc ~op :type :info, :error :unexpected-end-of-stream)
+            #"Socket error"
+            (condp re-find (.getMessage (.getCause e#))
+              #"unexpected end of stream"
+              (assoc ~op :type :info, :error :unexpected-end-of-stream)
 
-            #"Connection is closed"
-            (assoc ~op :type :info, :error :connection-closed)
+              #"Connection is closed"
+              (assoc ~op :type :info, :error :connection-closed)
+
+              #"Connection reset"
+              (assoc ~op :type :info, :error :connection-reset)
+
+              (throw+ e#))
+
+            #"WSREP has not yet prepared node for application use"
+            (assoc ~op :type :fail, :error :wsrep-not-yet-prepared)
+
+            (throw+ e#)))
+        (catch java.sql.SQLException e#
+          (condp re-find (.getMessage e#)
+            #"Record has changed since last read"
+            (assoc ~op :type :fail, :error :record-changed-since-last-read)
+
+            #"Lock wait timeout exceeded"
+            (assoc ~op :type :fail, :error :lock-wait-timeout-exceeded)
+
+            #"Not connected to Primary"
+            (assoc ~op :type :info, :error :not-connected-to-primary)
 
             (throw+ e#)))))
