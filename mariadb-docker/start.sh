@@ -1,42 +1,65 @@
 #!/bin/bash
+set -euo pipefail
 
-BRANCH=$1
-NPROC=`nproc --all`
-PREFIX=~/mariadb-bin
+NPROC=$(nproc --all)
+MARIADB_DIR=~/mariadb-bin
 
-LEIN_OPTIONS="run test --db maria-docker --nodes localhost --concurrency ${NPROC} --rate 1000 --time-limit 60 --key-count 40 --no-ssh=true --innodb-strict-isolation=true"
+create_build_tree_shim() {
+    local src=$1
+    local shim=~/mariadb-shim
+    mkdir -p "$shim/bin" "$shim/scripts" "$shim/lib/plugin" "$shim/data"
+    ln -sf "$src/sql/mariadbd" "$shim/bin/mariadbd"
+    ln -sf "$src/scripts/mariadbd-safe" "$shim/bin/mariadbd-safe"
+    ln -sf "$src/client/mysqladmin" "$shim/bin/mysqladmin"
+    ln -sf "$src/extra/my_print_defaults" "$shim/bin/my_print_defaults"
+    ln -sf "$src/extra/resolveip" "$shim/bin/resolveip"
+    ln -sf "$src/extra/resolve_stack_dump" "$shim/bin/resolve_stack_dump"
+    ln -sf "$src/extra/mariadbd-safe-helper" "$shim/bin/mariadbd-safe-helper"
+    ln -sf "$src/scripts/mariadb-install-db" "$shim/scripts/mariadb-install-db"
+    find "$src/plugin" "$src/storage" -maxdepth 2 -name '*.so' -type f \
+        -exec ln -sf {} "$shim/lib/plugin/" \;
+    ln -sf "$src/share" "$shim/share"
+    MARIADB_DIR=$shim
+}
 
-cd ~
-# Update the test
-rm -rf jepsen-mysql
-git clone https://github.com/vlad-lesin/jepsen-mysql
-git clone https://github.com/MariaDB/server --branch $BRANCH --depth 1
+if [ $# -gt 0 ]; then
+    REPO=$1
+    COMMITTISH=${2:-}
 
-mkdir build
-cd build
-cmake ../server -DPLUGIN_{ARCHIVE,TOKUDB,MROONGA,OQGRAPH,ROCKSDB,CONNECT,SPIDER,SPHINX,COLUMNSTORE,PERFSCHEMA,XPAND}=NO -DWITH_SAFEMALLOC=OFF -DCMAKE_BUILD_TYPE=RelWithDebinfo -DCMAKE_INSTALL_PREFIX=$PREFIX && make -j$NPROC install
+    cd ~
+    if [ -n "$COMMITTISH" ]; then
+        git clone "$REPO" --branch "$COMMITTISH" --depth 1 server
+    else
+        git clone "$REPO" --depth 1 server
+    fi
 
-# SSH is not neccessary for single-machine tests, but Jepsen itself can
-# require it for some cases, so just leave it here just in case.
-# sudo service ssh start
+    cmake -S server -B build \
+        -DPLUGIN_{ARCHIVE,TOKUDB,MROONGA,OQGRAPH,ROCKSDB,CONNECT,SPIDER,SPHINX,COLUMNSTORE,PERFSCHEMA,XPAND}=NO \
+        -DWITH_SAFEMALLOC=OFF \
+        -DCMAKE_BUILD_TYPE=RelWithDebinfo \
+        -DCMAKE_INSTALL_PREFIX="$MARIADB_DIR"
+    cmake --build build -j"$NPROC"
+    cmake --install build
+    rm -rf ~/server ~/build
+elif [ -f "$MARIADB_DIR/sql/mariadbd" ]; then
+    create_build_tree_shim "$MARIADB_DIR"
+fi
 
-cd ../jepsen-mysql
-echo "===========Append serializable============="
-../lein $LEIN_OPTIONS -w append -i serializable
-echo "===========Append repeatable-read============="
-../lein $LEIN_OPTIONS -w append -i repeatable-read
-echo "===========Append read-committed============="
-../lein $LEIN_OPTIONS -w append -i read-committed
-echo "===========Append read-uncommitted============="
-../lein $LEIN_OPTIONS -w append -i read-uncommitted
+if [ ! -f "$MARIADB_DIR/bin/mariadbd" ]; then
+    echo "Error: mariadbd not found at $MARIADB_DIR/bin/mariadbd" >&2
+    echo "Usage:" >&2
+    echo "  Clone & build:    docker run mariadb-jepsen <repo-url> [committish]" >&2
+    echo "  Prebuilt install: docker run -v /path/to/install:/home/mariadb/mariadb-bin mariadb-jepsen" >&2
+    echo "  Build tree:       docker run -v /path/to/build-tree:/home/mariadb/mariadb-bin mariadb-jepsen" >&2
+    exit 1
+fi
 
-echo "===========Non-repeatable read serializable============="
-../lein $LEIN_OPTIONS -w nonrepeatable-read -i serializable
-echo "===========Non-repeatable repeatable-read============="
-../lein $LEIN_OPTIONS -w nonrepeatable-read -i repeatable-read
+EXTRA_OPTS=""
+if [ "$MARIADB_DIR" = "$HOME/mariadb-shim" ]; then
+    EXTRA_OPTS="--mariadb-data-dir ${MARIADB_DIR}/data"
+fi
 
-echo "===========mav serializable============="
-../lein $LEIN_OPTIONS -w mav -i serializable
-echo "===========mav repeatable-read============="
-../lein $LEIN_OPTIONS -w mav -i repeatable-read
+export LEIN_OPTIONS="run test --db maria-docker --nodes localhost --concurrency ${NPROC} --rate 1000 --no-ssh=true --innodb-snapshot-isolation --mariadb-install-dir ${MARIADB_DIR} ${EXTRA_OPTS}"
 
+cd ~/jepsen-mariadb
+exec "${TEST_SCRIPT:-/tests.sh}"

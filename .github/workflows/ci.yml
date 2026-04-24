@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Leiningen
+        uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          lein: latest
+
+      - name: Cache Leiningen dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-lein-${{ hashFiles('project.clj') }}
+          restore-keys: ${{ runner.os }}-lein-
+
+      - name: Compile check
+        run: lein check
+
+  deploy:
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Leiningen
+        uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          lein: latest
+
+      - name: Cache Leiningen dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-lein-${{ hashFiles('project.clj') }}
+          restore-keys: ${{ runner.os }}-lein-
+
+      - name: Parse version
+        id: version
+        run: |
+          VERSION=$(grep -oP '(?<=defproject jepsen\.mariadb ")[^"]+' project.clj)
+
+          COMMIT_MSG=$(git log -1 --format=%s)
+
+          if [[ "$COMMIT_MSG" =~ \[release\ ([0-9]+\.[0-9]+\.[0-9]+)\] ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          elif [[ "$COMMIT_MSG" =~ \[release\] ]]; then
+            VERSION="${VERSION%-SNAPSHOT}"
+          else
+            BASE="${VERSION%-SNAPSHOT}"
+            TS=$(date -u +%Y%m%d%H%M%S)
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="${BASE}-${TS}-${SHORT_SHA}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set deploy version
+        run: |
+          sed -i "s/defproject jepsen\.mariadb \"[^\"]*\"/defproject jepsen.mariadb \"${{ steps.version.outputs.version }}\"/" project.clj
+
+      - name: Deploy to GitHub Packages
+        env:
+          DEPLOY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
+          printf '{:github-deploy {:deploy-repositories [["github" {:url "%s" :username "%s" :password :env/DEPLOY_TOKEN :sign-releases false}]]}}\n' \
+            "$REPO_URL" "${{ github.actor }}" > "$LEIN_HOME/profiles.clj"
+          lein with-profile +github-deploy deploy github
