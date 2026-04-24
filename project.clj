@@ -1,4 +1,4 @@
-(defproject jepsen.mysql "0.0.3-SNAPSHOT"
+(defproject jepsen.mariadb "0.0.3-SNAPSHOT"
   :description "Jepsen tests for MySQL and MariaDB"
   :url "https://github.com/jepsen-io/mysql"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
@@ -15,9 +15,9 @@
                                com.fasterxml.jackson.core/jackson-core]]
                  [io.jepsen/antithesis "0.1.0"]
                  [http-kit "2.8.1"]
-                 [com.github.seancorfield/next.jdbc "1.3.1070"]
-                 [com.mysql/mysql-connector-j "9.5.0"]
-                 [org.mariadb.jdbc/mariadb-java-client "3.5.6"]]
+                 [com.github.seancorfield/next.jdbc "1.3.1093"]
+                 [com.mysql/mysql-connector-j "9.7.0"]
+                 [org.mariadb.jdbc/mariadb-java-client "3.5.8"]]
   :main jepsen.mysql.cli
   :repl-options {:init-ns jepsen.mysql.repl}
   :jvm-opts ["-Djava.awt.headless=true"

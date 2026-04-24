@@ -98,6 +98,11 @@
                   :log-message    "Waiting for MySQL connection"
                   :timeout        10000})))
 
+(defn query-id
+  "Constructs a SQL comment prefix from an operation's index and time."
+  [op]
+  (str "/* " (:index op) "_" (:time op) " */ "))
+
 (defmacro with-errors
   "Takes an operation and a body, turning known errors into :fail or :info ops."
   [op & body]

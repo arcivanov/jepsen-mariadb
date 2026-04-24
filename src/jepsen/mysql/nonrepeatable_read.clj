@@ -53,8 +53,8 @@
           (j/execute! conn ["insert into people (id, name, gender) values (?, ?, ?)"
                             0 "moss" "enby"])))))
 
-  (invoke! [this test {:keys [index time f value] :as op}]
-    (let [query_id (str "/* " index "_" time " */ ")]
+  (invoke! [this test {:keys [f value] :as op}]
+    (let [query_id (c/query-id op)]
       (case f
         :change-name (do (j/execute!
                            conn [(str query_id "update people set name = ? where id = ?")
