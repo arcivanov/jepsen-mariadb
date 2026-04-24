@@ -1,23 +1,27 @@
 (ns jepsen.mysql.cli
   "Command-line entry point for MySQL tests."
+  (:gen-class)
   (:require [clojure [string :as str]]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [checker :as checker]
-             [cli :as cli]
-             [control :as c]
-             [db :as jepsen.db]
-             [generator :as gen]
-             [nemesis :as nemesis]
-             [os :as os]
-             [tests :as tests]
-             [util :as util]]
+            [jepsen [antithesis :as a]
+                    [checker :as checker]
+                    [cli :as cli]
+                    [control :as c]
+                    [db :as jepsen.db]
+                    [generator :as gen]
+                    [nemesis :as nemesis]
+                    [os :as os]
+                    [tests :as tests]
+                    [util :as util]]
+            [jepsen.antithesis.composer :as ac]
             [jepsen.checker.timeline :as timeline]
             [jepsen.nemesis.combined :as nc]
             [jepsen.os.debian :as debian]
             [jepsen.mysql [append :as append]
                           [closed-predicate :as closed-predicate]
                           [mav :as mav]
-                          [nonrepeatable-read :as nonrepeatable-read]]
+                          [nonrepeatable-read :as nonrepeatable-read]
+                          [build-smoke-test :as build-smoke-test]]
             [jepsen.mysql.db [maria :as db.maria]
                              [maria-docker :as db.maria-docker]
                              [mysql :as db.mysql]
@@ -39,15 +43,22 @@
    :closed-predicate    closed-predicate/workload
    :mav                 mav/workload
    :nonrepeatable-read  nonrepeatable-read/workload
+   :build-smoke-test    build-smoke-test/workload
    :none (fn [_] tests/noop-test)})
 
 (def all-workloads
   "A collection of workloads we run by default."
-  [])
+  [:append
+   :closed-predicate])
 
 (def all-nemeses
   "Combinations of nemeses for tests"
-  [[]])
+  [[]
+   [:pause]
+   [:kill]
+   [:partition]
+   [:clock]
+   [:pause :kill :partition :clock]])
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults"
@@ -71,10 +82,19 @@
    :read-committed      "RC"
    :read-uncommitted    "RU"})
 
+(defn stats-checker
+  "A version of the Jepsen stats checker that's always valid. Antithesis
+  generates tiny histories."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (assoc (checker/check (checker/stats) test history opts)
+             :valid? true))))
+
 (defn mysql-test
   "Given options from the CLI, constructs a test map."
   [opts]
-  (let [workload-name (:workload opts)
+  (let [workload-name (:workload opts :append)
         workload ((workloads workload-name) opts)
         db       ((db-types (:db opts)) opts)
         os       (case (:db opts)
@@ -92,43 +112,66 @@
                      {:db db
                       :nodes (:nodes opts)
                       :faults (:nemesis opts)
-                      :partition {:targets [:one :majority]}
-                      :pause {:targets [:one]}
-                      :kill  {:targets [:one :all]}
-                      :interval (:nemesis-interval opts)}))]
-    (merge tests/noop-test
-           opts
-           {:name (str (name (:db opts))
-                       " " (name workload-name)
-                       (when (:lazyfs opts) " lazyfs")
-                       " binlog=" (name (:binlog-format opts))
-                       (when (:innodb-strict-isolation opts)
-                         " strict-isolation")
-                       " " (short-isolation (:isolation opts)) "("
-                       (short-isolation (:expected-consistency-model opts)) ") "
-                       (str/join "," (map name (:nemesis opts))))
-            :ssh ssh
-            :os os
-            :net net
-            :db db
-            :checker (checker/compose
-                       {:perf (checker/perf
-                                {:nemeses (:perf nemesis)})
-                        :clock (checker/clock-plot)
-                        :stats (checker/stats)
-                        :exceptions (checker/unhandled-exceptions)
-                        :timeline (timeline/html)
-                        :workload (:checker workload)})
-            :client    (:client workload)
-            :nemesis   (:nemesis nemesis nemesis/noop)
-            :generator (->> (:generator workload)
-                            (gen/stagger (/ (:rate opts)))
-                            (gen/nemesis (:generator nemesis))
-                            (gen/time-limit (:time-limit opts)))})))
+                      :partition {:targets [:one :majority :majorities-ring]}
+                      :pause {:targets [:one :majority :all]}
+                      :kill  {:targets [:one :majority :all]}
+                      :interval (:nemesis-interval opts)}))
+        gen (->> (:generator workload)
+                 (gen/stagger (/ (:rate opts)))
+                 (gen/nemesis (:generator nemesis)))
+        gen (if (a/antithesis?)
+              (ac/main-gen gen)
+              (gen/time-limit (:time-limit opts) gen))]
+    (-> tests/noop-test
+        (merge
+          opts
+          {:name (str (name (:db opts))
+                      " " (name workload-name)
+                      (when (:lazyfs opts) " lazyfs")
+                      " binlog=" (name (:binlog-format opts))
+                      " flush-log=" (:innodb-flush-log-at-trx-commit opts)
+                      (when (:innodb-snapshot-isolation opts)
+                        " snapshot-isolation")
+                      " " (short-isolation (:isolation opts)) "("
+                      (short-isolation (:expected-consistency-model opts)) ") "
+                      (str/join "," (map name (:nemesis opts))))
+           :ssh ssh
+           :os os
+           :net net
+           :db db
+           :checker (checker/compose
+                      {:perf (checker/perf
+                               {:nemeses (:perf nemesis)})
+                       :clock (checker/clock-plot)
+                       :stats (stats-checker)
+                       :exceptions (checker/unhandled-exceptions)
+                       :timeline (timeline/html)
+                       :workload (:checker workload)})
+           :client    (a/client (:client workload))
+           :nemesis   (if (a/antithesis?)
+                        nemesis/noop
+                        (:nemesis nemesis nemesis/noop))
+           :generator gen})
+        a/test)))
+
+(defn antithesis-test
+  "Wraps mysql-test, allowing us to force antithesis mode"
+  [opts]
+  (if (:antithesis opts)
+    (with-redefs [a/antithesis? (constantly true)]
+      (mysql-test opts))
+    (mysql-test opts)))
 
 (def cli-opts
   "Command line options"
-  [[nil "--binlog-format FORMAT" "What binlog format should we use?"
+  [[nil "--antithesis" "Forces Antithesis mode. Useful for debugging in local docker."]
+
+   [nil "--antithesis-interval OP-COUNT" "Antithesis can terminate the test after each block of this many operations."
+    :default 100
+    :parse-fn parse-long
+    :validate [pos? "Must be positive"]]
+
+   [nil "--binlog-format FORMAT" "What binlog format should we use?"
     :default :mixed
     :parse-fn keyword
     :validate [#{:mixed :statement :row} "must be statement, mixed, or row"]]
@@ -157,12 +200,12 @@
     :default nil
     :parse-fn keyword]
 
-   [nil "--innodb-flush-log-at-trx-commit SETTING" "0 for write+flush n seconds, 1 for every txn commit, 2 for write at commit, flush every ns econds."
-    :default 1
+   [nil "--innodb-flush-log-at-trx-commit SETTING" "0 for write+flush n seconds, 1 for every txn commit, 2 for write at commit, flush every n seconds. MariaDB recommends 0 for Galera Cluster."
+    :default 0
     :parse-fn parse-long]
 
-   [nil "--innodb-strict-isolation" "If set, enables INNODB_STRICT_ISOLATION, an experiemental setting MariaDB developers are trying which might fix some of the bugs we found."
-    :default false]
+   [nil "--[no-]innodb-snapshot-isolation" "If set, enables INNODB_SNAPSHOT_ISOLATION, a new setting which makes MariaDB do SI, rather than the weird read-committed+ thing it used to do at REPEATABLE READ."
+    :default true]
 
    [nil "--insert-only" "If set, tells certain workloads (e.g. closed-predicate) to perform only inserts."
     :id :insert-only?]
@@ -181,12 +224,6 @@
     :validate [(partial every? #{:pause :kill :partition :clock})
                "Faults must be pause, kill, partition, clock, or member, or the special faults all or none."]]
 
-   [nil "--maria-ci-url URL" "The HTTP URL of a MariaDB CI build directory, e.g. https://ci.mariadb.org/43813. If the --db flag is `maria`, this is used to install a specific version of MariaDB."
-    :default "https://ci.mariadb.org/43813"]
-
-   [nil "--maria-package NAME" "The Debian package name we should install for mariadb. Note that Maria package names themselves include version strings!"
-    :default "mariadb-server"]
-
    [nil "--max-txn-length NUM" "Maximum number of operations in a transaction."
     :default  4
     :parse-fn parse-long
@@ -198,7 +235,7 @@
     :validate [pos? "Must be a positive integer."]]
 
    [nil "--nemesis-interval SECS" "Roughly how long between nemesis operations."
-    :default 5
+    :default 20
     :parse-fn read-string
     :validate [pos? "Must be a positive number."]]
 
@@ -206,7 +243,7 @@
     :parse-fn parse-long]
 
    ["-r" "--rate HZ" "Approximate request rate, in hz"
-    :default 100
+    :default  1000
     :parse-fn read-string
     :validate [pos? "Must be a positive number."]]
 
@@ -219,7 +256,6 @@
 
    ["-w" "--workload NAME" "What workload should we run?"
     :parse-fn keyword
-    :missing  (str "Must specify a workload: " (cli/one-of workloads))
     :validate [workloads (cli/one-of workloads)]]
 
    [nil "--dont-teardown" "Don't cleanup before and after testing."
@@ -249,8 +285,8 @@
   [opts]
   (let [nemeses   (if-let [n (:nemesis opts)] [n] all-nemeses)
         workloads (if-let [w (:workload opts)] [w] all-workloads)]
-    (for [n nemeses, w workloads, i (range (:test-count opts))]
-      (mysql-test (assoc opts :nemesis n :workload w)))))
+    (for [i (range (:test-count opts)), n nemeses, w workloads]
+      (antithesis-test (assoc opts :nemesis n :workload w)))))
 
 (defn opt-fn
   "Transforms CLI options before execution."
@@ -267,31 +303,34 @@
            completely uninstalls it on the given nodes."
     :run (fn [{:keys [options]}]
            (case (:db options)
-             (:mariadb-docker) (info "Wipe nothing in MariaDB Docker container")
-             ((info (pr-str options))
-              (c/on-many (:nodes options)
-                        (info "Wiping")
-                        (c/su
-                          (c/exec "DEBIAN_FRONTEND='noninteractive'"
-                                  :apt :remove :-y :--purge
-                                  (c/lit "mysql-*")
-                                  (c/lit "mariadb-*"))
-                          (c/exec :rm :-rf "/var/lib/mysql"
-                                  (c/lit "/var/lib/mysql-*")
-                                  "/var/log/mysql"
-                                  "/etc/mysql"))
-                        (info "Wiped")))))}})
+             :maria-docker (info "Wipe nothing in MariaDB Docker container")
+             (do (info (pr-str options))
+                 (c/on-many (:nodes options)
+                            (info "Wiping")
+                            (c/su
+                              (c/exec "DEBIAN_FRONTEND='noninteractive'"
+                                      :apt :remove :-y :--purge
+                                      (c/lit "mysql-*")
+                                      (c/lit "mariadb-*"))
+                              (c/exec :rm :-rf "/var/lib/mysql"
+                                      (c/lit "/var/lib/mysql-*")
+                                      "/var/log/mysql"
+                                      "/etc/mysql"))
+                            (info "Wiped")))))}})
 
 (defn -main
   "Handles command line arguments. Can either run a test, or a web server for
   browsing results."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn  mysql-test
+  (cli/run! (merge (cli/single-test-cmd {:test-fn  antithesis-test
                                          :opt-spec cli-opts
                                          :opt-fn   opt-fn})
                    (cli/test-all-cmd {:tests-fn all-tests
                                       :opt-spec cli-opts
                                       :opt-fn   opt-fn})
                    (cli/serve-cmd)
+                   (ac/antithesis-cmd {:test-fn  antithesis-test
+                                      :opt-spec cli-opts
+                                      :opt-fn   opt-fn})
                    wipe-command)
             args))
