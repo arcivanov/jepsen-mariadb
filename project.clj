@@ -1,4 +1,4 @@
-(defproject jepsen.mariadb "0.0.3-SNAPSHOT"
+(defproject jepsen.mariadb "0.0.3"
   :description "Jepsen tests for MySQL and MariaDB"
   :url "https://github.com/jepsen-io/mysql"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
